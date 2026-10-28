@@ -44,7 +44,7 @@ prompt changes, update `references/cron-prompt.md` and the live job (`hermes cro
   judgment alone.** This briefing gives none. If one is ever added, ship a script that fits it on
   history and prints walk-forward skill; let the agent adjust only within a capped band with a named
   reason, and score baseline and final separately. Worked example: `kospi-morning-forecast`.
-- Output: Korean, bullets, no tables, ≤1500 chars. Headline score + rating first, then components,
+- Output: Korean, bullets, no tables, ≤1800 chars (15 components with full raws alone take ~1500 — list scores on one line, raws only for the 2–3 key ones). Headline score + rating first, then components,
   then interpretation, then the caveat line.
 
 ## Procedure
@@ -78,9 +78,11 @@ prompt changes, update `references/cron-prompt.md` and the live job (`hermes cro
 - **CNN history: keep the LAST point per day and drop days after the reading's US session.** Each
   day starts with a carried-forward 00:00 point and gets recomputed after the close; keeping the first
   point showed stale values and a placeholder for "today".
-- **CNN `previous_close` ≠ the history value for that day by 1–3 points** — the history is recomputed
-  after the close. Normal; quote day-over-day change against `previous_close` and don't flag it as a
-  data error (the old briefing did so every day).
+- **CNN `previous_close` ≠ the history value for that day by a few points** (10-26: 27.3 vs 29.8) — the
+  history is recomputed after the close. Normal; don't flag it as a data error (the old briefing did so
+  every day). It means "close before the reading's ET date": at 08:30 KST that is the prior session,
+  but a reading taken before the next ET open (e.g. a 17:00 KST rerun) has `previous_close` = the same
+  session, so the script then takes day-over-day change from the history instead.
 - **`market_momentum_sp500` is the S&P level, `market_momentum_sp125` its 125-day MA**, same score.
   Print one score with both raws; never label the MA as the index level.
 - **Ignore the per-datapoint `rating` inside CNN components' `data[]`.** Use only the component's own

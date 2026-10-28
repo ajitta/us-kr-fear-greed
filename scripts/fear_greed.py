@@ -122,7 +122,11 @@ def cnn():
         else:
             raw_s = f"{raw:.3f}" if isinstance(raw, (int, float)) else "n/a"
         comps.append({"label": label, "desc": desc, "score": v["score"], "rating": v["rating"], "raw": raw_s})
-    return {"score": fg["score"], "rating": fg["rating"], "ts": ts, "session": sess,
+    # CNN's previous_close is "the close before the reading's ET date". At 08:30 KST (evening ET, after the
+    # close) that is the session before `sess`; for a reading taken before the next ET open it is `sess`
+    # itself (the score is then just a recompute of the same session).
+    pre_open = ts.astimezone(ET).date().isoformat() > sess
+    return {"score": fg["score"], "rating": fg["rating"], "ts": ts, "session": sess, "pre_open": pre_open,
             "prev_close": fg["previous_close"], "w1": fg["previous_1_week"], "m1": fg["previous_1_month"],
             "y1": fg["previous_1_year"], "daily": daily, "comps": comps}
 
@@ -197,7 +201,10 @@ def save_state(st):
 
 
 def fmt_delta(a, b):
-    return "n/a" if a is None or b is None else f"{a - b:+.1f}"
+    if a is None or b is None:
+        return "n/a"
+    d = round(a - b, 1)
+    return f"{d + 0.0:+.1f}"  # + 0.0 turns -0.0 into 0.0
 
 
 def main():
@@ -221,8 +228,8 @@ def main():
         print(s, flush=True)
     P(f"# 공포탐욕 데이터 (수집 {now:%Y-%m-%d %H:%M} KST)")
     P("\n## 갱신 상태")
-    P(f"- 미국 CNN: {'세션 ' + us['session'] + (' (신규)' if us_new else ' (직전 브리핑과 같은 세션 — 미국 휴장 등)') if us else '데이터 수집 실패'}")
-    P(f"- 한국 kospifgi: {'기준일 ' + kf['date'] + (' (신규)' if kr_new else ' (직전 브리핑과 같은 기준일 — 한국 휴장 등)') if kf else '데이터 수집 실패'}")
+    P(f"- 미국 CNN: {'세션 ' + us['session'] + (' (신규)' if us_new else ' (새 세션 없음: 직전 브리핑과 같은 세션 — 같은 날 재실행 또는 미국 휴장)') if us else '데이터 수집 실패'}")
+    P(f"- 한국 kospifgi: {'기준일 ' + kf['date'] + (' (신규)' if kr_new else ' (새 세션 없음: 직전 브리핑과 같은 기준일 — 같은 날 재실행 또는 한국 휴장)') if kf else '데이터 수집 실패'}")
     if sg:
         lag = f" — 주 소스보다 늦음(기준일 차이)" if kf and sg["date"] < kf["date"] else ""
         P(f"- 한국 siglens: {sg['date']} 종가 기준{lag}")
@@ -231,16 +238,26 @@ def main():
     P(f"- 한국 feargreed.co.kr: {'실시간 산출(' + fk['ts'] + ' UTC), KOSPI ' + str(fk['kospi']) + ' 반영' if fk else '데이터 수집 실패'}")
 
     # ------------------------------------------------ US
+    P("- 등급 구간: CNN 0–25 극단적 공포 / 25–45 공포 / 45–55 중립 / 55–75 탐욕 / 75–100 극단적 탐욕; "
+      "kospifgi 0–24 / 25–44 / 45–55 / 56–75 / 76–100; siglens 0–24 / 25–44 / 45–54 / 55–74 / 75–100")
     P("\n## 1. 미국 CNN Fear & Greed")
     if us:
         P(f"- 현재 {us['score']:.1f} ({ko(us['rating'])}) — {us['session']} 미국 장 마감 반영, 산출 {us['ts'].astimezone(KST):%m-%d %H:%M} KST")
-        P(f"- CNN 제공 비교값: 전일 종가 {us['prev_close']:.1f} ({fmt_delta(us['score'], us['prev_close'])}), "
+        ds_ = sorted(us["daily"])
+        prior = ds_[-2] if len(ds_) >= 2 and ds_[-1] == us["session"] else None
+        if us["pre_open"]:
+            pc = (f"전 거래일({prior}) 최종 {us['daily'][prior]:.1f} ({fmt_delta(us['score'], us['daily'][prior])}); "
+                  f"CNN previous_close {us['prev_close']:.1f}은 같은 {us['session']} 세션의 마감 시점 값(재산출 전)") if prior else \
+                 f"CNN previous_close {us['prev_close']:.1f}은 같은 {us['session']} 세션의 마감 시점 값"
+        else:
+            pc = f"전일 종가 {us['prev_close']:.1f} ({fmt_delta(us['score'], us['prev_close'])})"
+        P(f"- CNN 제공 비교값: {pc}, "
           f"1주 전 {us['w1']:.1f} ({fmt_delta(us['score'], us['w1'])}), 1개월 전 {us['m1']:.1f} ({fmt_delta(us['score'], us['m1'])}), "
           f"1년 전 {us['y1']:.1f} ({fmt_delta(us['score'], us['y1'])})")
         days = sorted(us["daily"])[-10:]
         P("- 최근 10거래일(각 날짜 최종 산출값): " + ", ".join(f"{d[5:]} {us['daily'][d]:.1f}" for d in days))
-        P("  ※ 일별 추이는 장 마감 후 재산출이 반영된 값이라 CNN '전일 종가' 값과 1~3p 다를 수 있음 — 정상, 불일치로 보고하지 말 것."
-          " 전일 대비 변화는 CNN '전일 종가' 기준으로 말할 것")
+        P("  ※ 일별 추이는 장 마감 후 재산출이 반영된 값이라 CNN previous_close와 수 포인트 다를 수 있음(예: 10-26 27.3 vs 29.8) — 정상,"
+          " 불일치로 보고하지 말 것. 전일 대비 변화는 위 비교값 줄 그대로 쓸 것")
         P("- 구성지표 (점수 0~100은 장기 분포 대비 백분위 / 원자료):")
         for c in us["comps"]:
             P(f"  - {c['label']}: {c['score']:.1f} ({ko(c['rating'])}) | {c['desc']}: {c['raw']}")
@@ -260,8 +277,6 @@ def main():
         for c in kf["comps"]:
             sc = f"{c['score']:.1f}" if isinstance(c["score"], (int, float)) else "n/a"
             P(f"  - {c['label']}: {sc} ({ko(c['rating'])}) | {c['desc']}: {c['raw']}")
-        if kf.get("summary"):
-            P(f"- (사이트 자체 AI 해석, 참고용) 전망 {kf.get('view')}: {kf['summary'][:200]}")
     else:
         P("- 데이터 수집 실패")
 
@@ -296,7 +311,12 @@ def main():
     if prev:
         P(f"- 직전 브리핑 {prev.get('run_at', '')[:16]}: 미국 {prev.get('us_score')} ({prev.get('us_session')}) / "
           f"kospifgi {prev.get('kr_score')} ({prev.get('kr_date')}) / siglens {prev.get('sg_score')} ({prev.get('sg_date')})")
-        P(f"- 변화: 미국 {fmt_delta(us and us['score'], prev.get('us_score'))}, kospifgi {fmt_delta(kf and kf['score'], prev.get('kr_score'))}")
+        sg_d = (f"{fmt_delta(sg['score'], prev.get('sg_score'))}" if sg and prev.get("sg_score") is not None else "n/a") + \
+            (f" ({prev.get('sg_date')}→{sg['date']})" if sg and sg["date"] != prev.get("sg_date") else " (같은 기준일)" if sg else "")
+        P(f"- 변화: 미국 {fmt_delta(us and us['score'], prev.get('us_score'))}"
+          + (" (같은 세션 재산출)" if us and us["session"] == prev.get("us_session") else "")
+          + f", kospifgi {fmt_delta(kf and kf['score'], prev.get('kr_score'))}"
+          + (" (같은 기준일)" if kf and kf["date"] == prev.get("kr_date") else "") + f", siglens {sg_d}")
     else:
         P("- 직전 기록 없음 (첫 실행)")
 
